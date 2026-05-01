@@ -19,13 +19,15 @@ DENSITY_MAP = {
     'DENSITY D': 'ACR D: extremely dense',
 }
 
+# FIX 1: BI-RADS 4 y 5 ahora tienen etiquetas distintas.
+# Antes ambos eran 'suspicious', lo que impedía al modelo diferenciarlos.
 BIRADS_SUSPICION = {
-    'BI-RADS 0': 'incomplete',
-    'BI-RADS 1': 'healthy',
-    'BI-RADS 2': 'benign',
-    'BI-RADS 3': 'probably benign',
-    'BI-RADS 4': 'suspicious',
-    'BI-RADS 5': 'suspicious',
+    'BI-RADS 0': 'incomplete — additional imaging needed',
+    'BI-RADS 1': 'negative — no abnormality',
+    'BI-RADS 2': 'benign — no malignancy',
+    'BI-RADS 3': 'probably benign — short-interval follow-up',
+    'BI-RADS 4': 'suspicious — tissue sampling advised',
+    'BI-RADS 5': 'highly suggestive of malignancy — biopsy recommended',
 }
 
 FINDING_EN = {
@@ -73,24 +75,31 @@ def build_report(study_id):
     left_findings  = get_findings_for(find_rows, 'L')
     right_findings = get_findings_for(find_rows, 'R')
 
-    # Findings summary en una sola oración como MammoWise
+    # Findings summary
     all_findings = set()
     for lat in ['L', 'R']:
         rows = find_rows[find_rows['laterality'] == lat]
         for _, r in rows.iterrows():
             all_findings.update(parse_findings(r))
     all_findings.discard('no significant findings')
-    findings_summary = ', '.join(all_findings) if all_findings else 'Healthy breast. No findings.'
+    findings_summary = ', '.join(all_findings) if all_findings else 'no significant findings'
 
-    birads_num = birads.replace('BI-RADS ', '')
-    suspicion  = BIRADS_SUSPICION.get(birads, 'benign')
+    # FIX 2: birads_num como campo separado (solo el dígito),
+    # más fácil de parsear durante evaluación sin regex sobre strings compuestos.
+    birads_num  = birads.replace('BI-RADS ', '')
+    suspicion   = BIRADS_SUSPICION.get(birads, 'benign')
     density_text = DENSITY_MAP.get(density, density)
 
     report = json.dumps({
-        'breast_density': density_text,
-        'findings'      : findings_summary,
-        'BI-RADS'       : f'{birads_num}: {suspicion}',
-        'suspicion'     : suspicion,
+        'breast_density'   : density_text,
+        'findings'         : findings_summary,
+        'left_findings'    : left_findings,
+        'right_findings'   : right_findings,
+        # FIX 2: campo numérico limpio para parseo directo en evaluación
+        'birads_category'  : birads_num,
+        # campo legible para el modelo durante generación de texto
+        'birads_assessment': f'BI-RADS {birads_num}: {suspicion}',
+        'suspicion'        : suspicion,
     }, ensure_ascii=False)
 
     return report
@@ -148,6 +157,7 @@ for birads, target in TARGET.items():
     if len(subset) >= target:
         balanced_parts.append(subset.sample(n=target, random_state=42))
     else:
+        # oversampling con reemplazo para clases minoritarias
         balanced_parts.append(subset.sample(n=target, replace=True, random_state=42))
 
 train_balanced = pd.concat(balanced_parts).sample(frac=1, random_state=42).reset_index(drop=True)
@@ -157,12 +167,24 @@ print(f'\nPost-rebalancing BI-RADS (train):')
 print(train_balanced['breast_birads'].value_counts())
 print(f'\nTrain: {len(train_balanced)} | Test: {len(test_df)} | Total: {len(df_final)}')
 
-# ── GUARDAR ───────────────────────────────────────────────────────────────────
+# ── VERIFICACIÓN DE SANIDAD ───────────────────────────────────────────────────
+print('\n── Sanity check: etiquetas únicas de suspicion ──')
+suspicion_check = {}
+for _, row in df_final.drop_duplicates('breast_birads').iterrows():
+    report_dict = json.loads(row['report'])
+    suspicion_check[row['breast_birads']] = report_dict['suspicion']
+for k, v in sorted(suspicion_check.items()):
+    print(f'  {k} → {v}')
+
+# ── GUARDAR (sobreescribe el CSV anterior) ────────────────────────────────────
 out_path = OUTPUT_DIR / 'vindr_reports.csv'
 df_final.to_csv(out_path, index=False)
-print(f'\n✅ Saved to {out_path}')
+print(f'\n✅ Saved to {out_path}  (sobreescribió versión anterior)')
 
-print('\n─── Example BI-RADS 1 ───')
-print(df_final[df_final['breast_birads'] == 'BI-RADS 1']['report'].iloc[0])
-print('\n─── Example BI-RADS 5 ───')
-print(df_final[df_final['breast_birads'] == 'BI-RADS 5']['report'].iloc[0])
+print('\n─── Ejemplo BI-RADS 4 ───')
+ex4 = df_final[df_final['breast_birads'] == 'BI-RADS 4']['report'].iloc[0]
+print(json.dumps(json.loads(ex4), indent=2, ensure_ascii=False))
+
+print('\n─── Ejemplo BI-RADS 5 ───')
+ex5 = df_final[df_final['breast_birads'] == 'BI-RADS 5']['report'].iloc[0]
+print(json.dumps(json.loads(ex5), indent=2, ensure_ascii=False))
