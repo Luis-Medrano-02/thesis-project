@@ -344,3 +344,49 @@
 ```json
 {"birads": "3", "density": "B", "findings": "mass found in left cranio-caudal (CC)"}
 ```
+
+## Auditoría Post-Run 2 — Hallazgos adicionales (2026-05-22)
+
+### N1 — torch.no_grad() en CollapseCallback ✅ YA FIJO
+- Revisión de Cell 26 confirma que `with torch.no_grad():` envuelve correctamente el loop de generate() en CollapseCallback.
+- El resumen de sesión anterior lo marcó como pendiente, pero la revisión directa del archivo muestra que el fix estaba aplicado. No requiere acción.
+
+### N2 — val_ds dead code ⚠️ MENOR (sin acción)
+- `val_ds` se construye en Cell 18 pero `eval_strategy='no'` en SFTConfig hace que SFTTrainer nunca lo evalúe.
+- No es un bug: es código defensivo inutilizado. No tiene impacto en training ni en resultados.
+- Decisión: mantener (documentar como limitación de diseño si se pregunta en tesis).
+
+### N3 — max_new_tokens=128 en Cell 29 ✅ FIJO (2026-05-22)
+- La llamada baseline en Cell 29 usaba `max_new_tokens=128` mientras CONFIG y todos los demás sitios usan `124`.
+- Fix aplicado: `max_new_tokens=128` → `max_new_tokens=124` en Cell 29.
+
+## Run 3 — Cambios de hiperparámetros (2026-05-22)
+
+### Motivación matemática
+- Run 1-2: `lora_alpha=16, r=32` → scaling `α/r = 0.5` → actualización efectiva en espacio de pesos `ΔW_eff = 0.5 × 1e-4 = 5×10⁻⁵`
+- Esto está por debajo del estándar LoRA (alpha=r, scaling=1.0) y es la causa principal del gap vs MammoWise (0.394 vs 0.6355 BIRADS acc)
+- MammoWise (mismo dataset, mismo modelo, mismo rebalanceo) usa `lr=2e-4` → su `ΔW_eff ≈ 1×10⁻⁴` (2x mayor)
+
+### Cambios aplicados al notebook
+
+| Parámetro | Run 1-2 | Run 3 | Justificación |
+|-----------|---------|-------|---------------|
+| `lora_alpha` | 16 | **32** | scaling 0.5 → 1.0 (estándar LoRA paper). `ΔW_eff = 1.0 × 1e-4 = 1×10⁻⁴` |
+| `epochs` | 15 | **10** | Overfitting confirmado post-época 10 en Run 1 y MammoWise (0.6355 ep10 → 0.5139 ep15) |
+| `lora_r` | 32 | 32 (sin cambio) | Suficiente para tarea multi-output. Sin ablación que justifique cambio |
+| `lr` | 1e-4 | 1e-4 (sin cambio) | Con alpha=32, la actualización efectiva ya es 2x. No doblar ambos |
+| `lora_dropout` | 0.05 | 0.05 (sin cambio) | Consistente con AMRG y MammoWise. Sin evidencia de que más dropout ayude |
+
+### Implicación de epochs=10 en save_total_limit
+- `save_total_limit=10` con 10 épocas → guarda TODOS los checkpoints (épocas 1-10)
+- Antes: con 15 épocas, descartaba épocas 1-5
+
+### Papers de referencia analizados
+- **AMRG (Sung et al., 2025):** `r=32, alpha=16, dropout=0.05`, dataset DMID (407 train), batch=4×8=32. LoRA en TODOS los linear (encoder + decoder). Mejor resultado: BIRADS 0.5582.
+- **MammoWise (Jahangir et al., 2026):** mismo VinDr-Mammo, mismo rebalanceo 2200 muestras, `alpha=16, dropout=0.05, lr=2e-4`, r no especificado. Multi-task ep10: BIRADS 0.6355. Single-task ep10: BIRADS 0.7545.
+- **Diferencia clave vs AMRG:** sus dropout=0.05 confirmado en texto (diagrama mostraba p=0.05, no p=0.5 como se interpretó erróneamente).
+- **Ventaja propia vs MammoWise:** resolución 896×896 vs 512×512 → 3x más tokens visuales para SigLIP → mayor detalle para BIRADS 3/4/5 (microcalcificaciones, márgenes).
+
+### Métrica adicional a reportar en tesis
+- BIRADS accuracy con tolerancia ±1 (error clínicamente menor confundir 3↔4 que 1↔5)
+- No requiere cambios en código, solo en evaluación/reporte.
